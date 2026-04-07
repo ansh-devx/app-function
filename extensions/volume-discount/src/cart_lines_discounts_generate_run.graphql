@@ -1,0 +1,23 @@
+query CartInput {
+  cart {
+    lines {
+      id
+      quantity
+      cost {
+        amountPerQuantity { amount }
+      }
+      merchandise {
+        __typename
+        ... on ProductVariant {
+          id
+          product { id }
+        }
+      }
+    }
+  }
+  discount {
+    metafield(namespace: "$app:volume-campaigns", key: "config") {
+      value
+    }
+  }
+}

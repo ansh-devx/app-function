@@ -1,0 +1,29 @@
+query CartInput {
+  cart {
+    buyerIdentity {
+      customer {
+        hasTags(tags: ["VIP", "Gold", "Premium", "Silver", "Bronze", "Wholesale", "member", "LOYALTY"]) {
+          tag
+          hasTag
+        }
+      }
+    }
+    lines {
+      id
+      merchandise {
+        __typename
+        ... on ProductVariant {
+          id
+          product {
+            id
+          }
+        }
+      }
+    }
+  }
+  discount {
+    metafield(namespace: "$app:discount-function", key: "config") {
+      value
+    }
+  }
+}

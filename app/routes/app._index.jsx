@@ -1,243 +1,175 @@
-import { useEffect } from "react";
-import { useFetcher } from "react-router";
-import { useAppBridge } from "@shopify/app-bridge-react";
+import { useLoaderData, useNavigate } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
+import { useRouteError } from "react-router";
 import { authenticate } from "../shopify.server";
 
-export const loader = async ({ request }) => {
-  await authenticate.admin(request);
-
-  return null;
-};
-
-export const action = async ({ request }) => {
-  const { admin } = await authenticate.admin(request);
-  const color = ["Red", "Orange", "Yellow", "Green"][
-    Math.floor(Math.random() * 4)
-  ];
-  const response = await admin.graphql(
-    `#graphql
-      mutation populateProduct($product: ProductCreateInput!) {
-        productCreate(product: $product) {
-          product {
-            id
-            title
-            handle
-            status
-            variants(first: 10) {
-              edges {
-                node {
-                  id
-                  price
-                  barcode
-                  createdAt
-                }
-              }
-            }
-          }
+const GET_CAMPAIGNS = `#graphql
+  query GetCampaignStats {
+    discountNodes(first: 250, query: "type:app") {
+      nodes {
+        discount {
+          __typename
+          ... on DiscountAutomaticApp { discountId title status startsAt endsAt }
+          ... on DiscountCodeApp { discountId title status startsAt endsAt }
         }
-      }`,
-    {
-      variables: {
-        product: {
-          title: `${color} Snowboard`,
-        },
-      },
-    },
-  );
-  const responseJson = await response.json();
-  const product = responseJson.data.productCreate.product;
-  const variantId = product.variants.edges[0].node.id;
-  const variantResponse = await admin.graphql(
-    `#graphql
-    mutation shopifyReactRouterTemplateUpdateVariant($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
-      productVariantsBulkUpdate(productId: $productId, variants: $variants) {
-        productVariants {
-          id
-          price
-          barcode
-          createdAt
-        }
+        volumeMeta: metafield(namespace: "$app:volume-campaigns", key: "config") { value }
+        vipMeta: metafield(namespace: "$app:discount-function", key: "config") { value }
       }
-    }`,
-    {
-      variables: {
-        productId: product.id,
-        variants: [{ id: variantId, price: "100.00" }],
-      },
-    },
-  );
-  const variantResponseJson = await variantResponse.json();
+    }
+  }
+`;
 
-  return {
-    product: responseJson.data.productCreate.product,
-    variant: variantResponseJson.data.productVariantsBulkUpdate.productVariants,
-  };
+export const loader = async ({ request }) => {
+  const { admin } = await authenticate.admin(request);
+  const res = await admin.graphql(GET_CAMPAIGNS);
+  const { data } = await res.json();
+
+  const validTypes = ["DiscountAutomaticApp", "DiscountCodeApp"];
+  const nodes = (data?.discountNodes?.nodes ?? []).filter(
+    (n) => (n.volumeMeta || n.vipMeta) && validTypes.includes(n.discount?.__typename)
+  );
+
+  const stats = { ACTIVE: 0, SCHEDULED: 0, PAUSED: 0, EXPIRED: 0 };
+  const recent = [];
+
+  for (const n of nodes) {
+    const d = n.discount;
+    const isVip = !!n.vipMeta;
+    let config = {};
+    try { config = JSON.parse(isVip ? n.vipMeta.value : n.volumeMeta.value); } catch {}
+    const paused = isVip ? false : (config.paused ?? false);
+    const status = paused ? "PAUSED" : (d.status ?? "UNKNOWN");
+    if (status in stats) stats[status]++;
+    if (recent.length < 5) {
+      recent.push({ id: d.discountId, title: d.title, status, startsAt: d.startsAt ?? null });
+    }
+  }
+
+  return { stats, recent, total: nodes.length };
 };
 
-export default function Index() {
-  const fetcher = useFetcher();
-  const shopify = useAppBridge();
-  const isLoading =
-    ["loading", "submitting"].includes(fetcher.state) &&
-    fetcher.formMethod === "POST";
+const fmtDate = (iso) =>
+  iso ? new Date(iso).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) : "—";
 
-  useEffect(() => {
-    if (fetcher.data?.product?.id) {
-      shopify.toast.show("Product created");
-    }
-  }, [fetcher.data?.product?.id, shopify]);
-  const generateProduct = () => fetcher.submit({}, { method: "POST" });
+const STATUS_TONE = { ACTIVE: "success", SCHEDULED: "caution", PAUSED: "neutral", EXPIRED: "neutral" };
+const STATUS_LABEL = { ACTIVE: "Active", SCHEDULED: "Scheduled", PAUSED: "Paused", EXPIRED: "Expired", UNKNOWN: "Unknown" };
+
+const STAT_CARDS = [
+  { key: "ACTIVE",    label: "Active" },
+  { key: "SCHEDULED", label: "Scheduled" },
+  { key: "PAUSED",    label: "Paused" },
+  { key: "EXPIRED",   label: "Expired" },
+];
+
+const TH = { padding: "10px 16px", fontSize: "12px", fontWeight: "600", color: "#616161", textAlign: "left", background: "#FAFBFB", borderBottom: "1px solid #E1E3E5" };
+const TD = { padding: "14px 16px", fontSize: "13px", color: "#1c2024", verticalAlign: "middle" };
+
+export default function Dashboard() {
+  const { stats, recent, total } = useLoaderData();
+  const navigate = useNavigate();
 
   return (
-    <s-page heading="Shopify app template">
-      <s-button slot="primary-action" onClick={generateProduct}>
-        Generate a product
+    <s-page heading="Dashboard">
+      <s-button slot="primary-action" variant="primary" onClick={() => navigate("/app/campaigns/new")}>
+        Create campaign
       </s-button>
 
-      <s-section heading="Congrats on creating a new Shopify app 🎉">
-        <s-paragraph>
-          This embedded app template uses{" "}
-          <s-link
-            href="https://shopify.dev/docs/apps/tools/app-bridge"
-            target="_blank"
-          >
-            App Bridge
-          </s-link>{" "}
-          interface examples like an{" "}
-          <s-link href="/app/additional">additional page in the app nav</s-link>
-          , as well as an{" "}
-          <s-link
-            href="https://shopify.dev/docs/api/admin-graphql"
-            target="_blank"
-          >
-            Admin GraphQL
-          </s-link>{" "}
-          mutation demo, to provide a starting point for app development.
-        </s-paragraph>
-      </s-section>
-      <s-section heading="Get started with products">
-        <s-paragraph>
-          Generate a product with GraphQL and get the JSON output for that
-          product. Learn more about the{" "}
-          <s-link
-            href="https://shopify.dev/docs/api/admin-graphql/latest/mutations/productCreate"
-            target="_blank"
-          >
-            productCreate
-          </s-link>{" "}
-          mutation in our API references.
-        </s-paragraph>
-        <s-stack direction="inline" gap="base">
-          <s-button
-            onClick={generateProduct}
-            {...(isLoading ? { loading: true } : {})}
-          >
-            Generate a product
-          </s-button>
-          {fetcher.data?.product && (
-            <s-button
-              onClick={() => {
-                shopify.intents.invoke?.("edit:shopify/Product", {
-                  value: fetcher.data?.product?.id,
-                });
-              }}
-              target="_blank"
-              variant="tertiary"
+      <s-section>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "12px" }}>
+          {STAT_CARDS.map(({ key, label }) => (
+            <div
+              key={key}
+              onClick={() => navigate("/app/campaigns")}
+              style={{ padding: "20px 16px", borderRadius: "8px", border: "1px solid #E1E3E5", background: "#fff", cursor: "pointer" }}
             >
-              Edit product
-            </s-button>
-          )}
-        </s-stack>
-        {fetcher.data?.product && (
-          <s-section heading="productCreate mutation">
-            <s-stack direction="block" gap="base">
-              <s-box
-                padding="base"
-                borderWidth="base"
-                borderRadius="base"
-                background="subdued"
-              >
-                <pre style={{ margin: 0 }}>
-                  <code>{JSON.stringify(fetcher.data.product, null, 2)}</code>
-                </pre>
-              </s-box>
+              <div style={{ fontSize: "30px", fontWeight: "700", color: "#1c2024", lineHeight: 1, marginBottom: "6px" }}>
+                {stats[key]}
+              </div>
+              <div style={{ fontSize: "13px", color: "#616161" }}>{label}</div>
+            </div>
+          ))}
+        </div>
+      </s-section>
 
-              <s-heading>productVariantsBulkUpdate mutation</s-heading>
-              <s-box
-                padding="base"
-                borderWidth="base"
-                borderRadius="base"
-                background="subdued"
-              >
-                <pre style={{ margin: 0 }}>
-                  <code>{JSON.stringify(fetcher.data.variant, null, 2)}</code>
-                </pre>
-              </s-box>
-            </s-stack>
-          </s-section>
+      <s-section heading="Recent campaigns">
+        {total === 0 ? (
+          <div style={{ textAlign: "center", padding: "40px 24px", border: "2px dashed #E1E3E5", borderRadius: "8px" }}>
+            <s-text emphasis="bold">No campaigns yet</s-text>
+            <div style={{ marginTop: "8px" }}>
+              <s-paragraph>Create your first campaign to offer tiered or VIP pricing.</s-paragraph>
+            </div>
+            <div style={{ marginTop: "16px" }}>
+              <s-button variant="primary" onClick={() => navigate("/app/campaigns/new")}>Create campaign</s-button>
+            </div>
+          </div>
+        ) : (
+          <div>
+            <div style={{ border: "1px solid #E1E3E5", borderRadius: "8px", overflow: "hidden" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr>
+                    <th style={TH}>Name</th>
+                    <th style={TH}>Status</th>
+                    <th style={TH}>Started</th>
+                    <th style={{ ...TH, textAlign: "right" }}></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {recent.map((c, i) => {
+                    const isLast = i === recent.length - 1;
+                    const td = { ...TD, borderBottom: isLast ? "none" : "1px solid #E1E3E5" };
+                    return (
+                      <tr key={c.id}>
+                        <td style={{ ...td, fontWeight: "600" }}>{c.title}</td>
+                        <td style={td}>
+                          <s-badge tone={STATUS_TONE[c.status] ?? "neutral"}>
+                            {STATUS_LABEL[c.status] ?? c.status}
+                          </s-badge>
+                        </td>
+                        <td style={{ ...td, color: "#616161" }}>{fmtDate(c.startsAt)}</td>
+                        <td style={{ ...td, textAlign: "right" }}>
+                          <s-button variant="secondary" onClick={() => navigate(`/app/campaigns/${encodeURIComponent(c.id)}`)}>Edit</s-button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            {total > 5 && (
+              <div style={{ marginTop: "12px", textAlign: "center" }}>
+                <s-button variant="tertiary" onClick={() => navigate("/app/campaigns")}>
+                  View all {total} campaigns
+                </s-button>
+              </div>
+            )}
+          </div>
         )}
       </s-section>
 
-      <s-section slot="aside" heading="App template specs">
-        <s-paragraph>
-          <s-text>Framework: </s-text>
-          <s-link href="https://reactrouter.com/" target="_blank">
-            React Router
-          </s-link>
-        </s-paragraph>
-        <s-paragraph>
-          <s-text>Interface: </s-text>
-          <s-link
-            href="https://shopify.dev/docs/api/app-home/using-polaris-components"
-            target="_blank"
-          >
-            Polaris web components
-          </s-link>
-        </s-paragraph>
-        <s-paragraph>
-          <s-text>API: </s-text>
-          <s-link
-            href="https://shopify.dev/docs/api/admin-graphql"
-            target="_blank"
-          >
-            GraphQL
-          </s-link>
-        </s-paragraph>
-        <s-paragraph>
-          <s-text>Database: </s-text>
-          <s-link href="https://www.prisma.io/" target="_blank">
-            Prisma
-          </s-link>
-        </s-paragraph>
+      <s-section slot="aside" heading="Quick actions">
+        <s-stack direction="block" gap="tight">
+          <s-button variant="primary" onClick={() => navigate("/app/campaigns/new")}>Create campaign</s-button>
+          <s-button variant="secondary" onClick={() => navigate("/app/campaigns")}>View all campaigns</s-button>
+        </s-stack>
       </s-section>
 
-      <s-section slot="aside" heading="Next steps">
-        <s-unordered-list>
-          <s-list-item>
-            Build an{" "}
-            <s-link
-              href="https://shopify.dev/docs/apps/getting-started/build-app-example"
-              target="_blank"
-            >
-              example app
-            </s-link>
-          </s-list-item>
-          <s-list-item>
-            Explore Shopify&apos;s API with{" "}
-            <s-link
-              href="https://shopify.dev/docs/apps/tools/graphiql-admin-api"
-              target="_blank"
-            >
-              GraphiQL
-            </s-link>
-          </s-list-item>
-        </s-unordered-list>
+      <s-section slot="aside" heading="About">
+        <s-stack direction="block" gap="base">
+          <s-paragraph>
+            Offer tiered bundle pricing — customers get better deals when they buy more.
+          </s-paragraph>
+          <s-paragraph>
+            Discounts apply automatically at checkout. No coupon codes needed.
+          </s-paragraph>
+        </s-stack>
       </s-section>
     </s-page>
   );
 }
 
-export const headers = (headersArgs) => {
-  return boundary.headers(headersArgs);
-};
+export function ErrorBoundary() {
+  return boundary.error(useRouteError());
+}
+
+export const headers = (headersArgs) => boundary.headers(headersArgs);
